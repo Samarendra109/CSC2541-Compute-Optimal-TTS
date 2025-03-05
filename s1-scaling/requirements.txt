@@ -1,0 +1,5 @@
+datasets==3.3.1
+tqdm==4.67.1+computecanada
+transformers==4.48.2+computecanada
+transformers==4.49.0
+vllm==0.6.2+computecanada
