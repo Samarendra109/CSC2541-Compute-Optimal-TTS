@@ -1,0 +1,3 @@
+[submodule "openr"]
+	path = openr
+	url = https://github.com/openreasoner/openr.git
