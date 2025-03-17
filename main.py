@@ -121,6 +121,7 @@ def main():
             eval_args.model_name,
             lm_step_tag=lm_step_tag,
             backend="vllm" if eval_args.vllm else "hf",
+            gpu_util=eval_args.model_gpu_util,
         )
     # VLLMRemoteCaller(
     #     eval_args.model_name, eval_args.controller_addr, lm_step_tag=lm_step_tag
@@ -141,10 +142,12 @@ def main():
             model_name=eval_args.verifier_model,
             controller_addr=eval_args.controller_addr,
         )
-        # if not eval_args.vllm:
-        rm_call = LocalRewardModelCaller(
-            rm_config, backend="vllm" if eval_args.vllm else "hf"
-        )
+        if not eval_args.vllm:
+            rm_call = LocalRewardModelCaller(
+                rm_config,
+                backend="vllm" if eval_args.vllm else "hf",
+                gpu_util=eval_args.prm_gpu_util,
+            )
 
     # Configure generation parameters
     gen_config = LMCallingConfig(
@@ -269,6 +272,7 @@ def main():
     # Determine the number of workers (processes) -> TODO: I think should be num_gpu in the local setting? but it is based on num_cpus in their serve based setting
     num_workers = os.cpu_count() - 1 if os.cpu_count() > 1 else 1
     num_workers = min(num_workers, 8)  # Limit to a reasonable number
+    print(num_workers)
     # num_workers = 1
     num_workers = min(4, num_gpus)
 
@@ -283,7 +287,9 @@ def main():
         Evaluate problems in parallel using a process pool.
         """
         results = []
-        kwargs = dict()
+        kwargs = dict(
+            model_gpu_util=eval_args.model_gpu_util, prm_gpu_util=eval_args.prm_gpu_util
+        )
         if eval_args.vllm:
             kwargs["lm_call"] = eval_args.model_name
             kwargs["backend"] = "vllm"

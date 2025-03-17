@@ -18,12 +18,13 @@ uv sync --extra build --extra compile
 If the above fails, revert to the openr installation.
 
 ```bash
-python main.py --model_name "Qwen/Qwen2.5-0.5B-Instruct"   --tts_strategy bon   --beam_width 5   --task_name MATH   --use_wandb=false   --save_dir "./results" --verifier_model "Qwen/Qwen2.5-0.5B-Instruct"  
+python main.py --model_name "Qwen/Qwen2.5-0.5B-Instruct"   --tts_strategy bon   --beam_width 5   --task_name MATH   --use_wandb=false   --save_dir "./results" --verifier_model "Qwen/Qwen2.5-0.5B-Instruct"  --vllm
 
-## currently vllm version is not working
-# --vllm
+python main.py --model_name "Qwen/Qwen2.5-0.5B-Instruct"   --tts_strategy bon   --beam_width 5   --task_name MATH   --use_wandb=false   --save_dir "./results" --verifier_model "peiyi9979/math-shepherd-mistral-7b-prm" --vllm
+
 ```
 
+VLLM version is faster, pass `--vllm` to enable vllm backend.
 
 TODOs
 - [ ] Serve models in the cluster

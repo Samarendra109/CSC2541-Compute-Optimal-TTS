@@ -2,6 +2,7 @@
 Wrapper module to create LM and RM calling functions for OpenR.
 """
 
+import re
 from typing import Callable, List, Literal, Optional, Tuple, Union
 
 import torch
@@ -18,9 +19,13 @@ try:
 except ImportError:
     VLLM_AVAILABLE = False
 
+import logging
+
 import ray
 
 from openr.reason.inference.lm_call import LanguageModelCallingFunction, LMCallingConfig
+
+logger = logging.getLogger(__name__)
 
 
 class LMOutput:
@@ -101,7 +106,7 @@ def hf_call(prompt: str, config: LMCallingConfig, model, tokenizer, device):
 
 
 def hf_rm_call(prompt: List[str], config: LMCallingConfig, model, tokenizer, device):
-    inputs = [tokenizer(p, return_tensors="pt").to(device) for p in prompt]
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
     prompt_tokens = inputs.input_ids.shape[1]
 
     generation_config = {
@@ -113,7 +118,7 @@ def hf_rm_call(prompt: List[str], config: LMCallingConfig, model, tokenizer, dev
         "num_return_sequences": 1,
         "pad_token_id": tokenizer.eos_token_id,
         "return_dict_in_generate": True,
-        "output_scores": True,  # To get logprobs
+        "output_scores": False,  # To get logprobs
     }
 
     with torch.no_grad():
@@ -127,24 +132,6 @@ def hf_rm_call(prompt: List[str], config: LMCallingConfig, model, tokenizer, dev
     ]
     # Get sequence lengths
     output_token_lens = [(seq.size(0) - prompt_tokens) for seq in sequences]
-    scores = outputs.scores if hasattr(outputs, "scores") else None
-    transition_scores = model.compute_transition_scores(
-        outputs.sequences, outputs.scores, normalize_logits=False
-    )
-    cum_logprobs = []
-    for i, seq_len in enumerate(output_token_lens):
-        # Get scores only for generated tokens (not prompt tokens)
-        seq_scores = transition_scores[
-            i, prompt_tokens - 1 : prompt_tokens + seq_len - 1
-        ]
-        # Sum log probabilities
-        cum_logprob = seq_scores.sum().item()
-        cum_logprobs.append(cum_logprob)
-
-    # Calculate avg logprob by length
-    avg_len_logps = [
-        clp / max(1, otl) for clp, otl in zip(cum_logprobs, output_token_lens)
-    ]
 
     # Determine finish reasons (simplified)
     finish_reasons = [
@@ -157,8 +144,8 @@ def hf_rm_call(prompt: List[str], config: LMCallingConfig, model, tokenizer, dev
         text=generated_texts,
         prompt_tokens=[prompt_tokens] * config.n,
         num_tokens=output_token_lens,
-        cumulative_logprob=cum_logprobs,
-        logp_avg_by_len=avg_len_logps,
+        cumulative_logprob=None,
+        logp_avg_by_len=None,
         finish_reason=finish_reasons,
     )
 
@@ -175,10 +162,9 @@ def vllm_call(prompt: str, config: LMCallingConfig, llm, tokenizer) -> LMOutput:
     )
     outputs = llm.generate([prompt] * config.n, sampling_params)
     generated_texts = [output.outputs[0].text for output in outputs]
-    token_count = (
-        sum(len(tokenizer.encode(text)) for text in generated_texts) // config.n
-    )
-    return LMOutput(text=generated_texts, num_tokens=token_count)
+
+    num_tokens = [len(tokenizer.encode(text)) for text in generated_texts]
+    return LMOutput(text=generated_texts, num_tokens=num_tokens)
 
 
 def create_lm_call(
@@ -229,8 +215,6 @@ Score:"""
         output = lm_call(verify_prompt, config)
         score_text = output.text[0].strip()
         try:
-            import re
-
             score_match = re.search(r"(\d+(\.\d+)?)", score_text)
             if score_match:
                 score = float(score_match.group(1))
@@ -250,6 +234,8 @@ class LocalLMCaller(LanguageModelCallingFunction):
         model_name: str,
         lm_step_tag: str = None,
         backend: Literal["hf", "vllm"] = "vllm",
+        prm: bool = False,
+        gpu_util: float = 0.4,
     ):
         super().__init__(lm_step_tag)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -257,25 +243,38 @@ class LocalLMCaller(LanguageModelCallingFunction):
         if backend == "hf":
             self.model = load_model(model_name, dtype="bfloat16")
         elif backend == "vllm":
-            self.model = load_vllm_model(model_name, dtype="bfloat16")
+            self.model = load_vllm_model(
+                model_name, dtype="bfloat16", gpu_memory_utilization=gpu_util
+            )
         else:
             raise ValueError("Pass hf or vllm as backend.")
         self.backend = backend
         self.lm_step_tag = lm_step_tag
+        self.prm = prm
 
     def __call__(self, input_str: str, config: LMCallingConfig) -> LMOutput:
         if self.backend == "vllm":
             return vllm_call(input_str, config, self.model, self.tokenizer)
+
+        if self.prm:
+            return hf_rm_call(
+                input_str, config, self.model, self.tokenizer, self.device
+            )
         return hf_call(input_str, config, self.model, self.tokenizer, self.device)
 
 
 class LocalRewardModelCaller:
-    def __init__(self, config, backend: Literal["hf", "vllm"] = "hf"):
+    def __init__(
+        self, config, backend: Literal["hf", "vllm"] = "hf", gpu_util: foat = 0.4
+    ):
         self.config = config
         self.step_tag = config.step_tag
         self.format_str = config.format_str
         self.model = LocalLMCaller(
-            config.model_name, lm_step_tag=config.step_tag, backend=backend
+            config.model_name,
+            lm_step_tag=config.step_tag,
+            backend=backend,
+            gpu_util=gpu_util,
         )
 
     def __call__(
@@ -284,19 +283,19 @@ class LocalRewardModelCaller:
         lm_step_tag: str,
     ) -> Union[List[int], List[List[int]]]:
         ##TODO
-        if isinstance(question_answer_pairs[0], str):
-            response = self.replace_step_tag(question_answer_pairs[1], lm_step_tag)
-            input_str = self.format_str.format(
-                question=question_answer_pairs[0], answer=response
-            )
-        else:
-            input_str = [
-                self.format_str.format(
-                    question=s[0],
-                    answer=self.replace_step_tag(s[1], lm_step_tag),
-                )
-                for s in question_answer_pairs
-            ]
+        # if isinstance(question_answer_pairs[0], str):
+        #     response = self.replace_step_tag(question_answer_pairs[1], lm_step_tag)
+        #     input_str = self.format_str.format(
+        #         question=question_answer_pairs[0], answer=response
+        #     )
+        # else:
+        #     input_str = [
+        #         self.format_str.format(
+        #             question=s[0],
+        #             answer=self.replace_step_tag(s[1], lm_step_tag),
+        #         )
+        #         for s in question_answer_pairs
+        #     ]
         scores = []
         for i, (question, answer) in enumerate(question_answer_pairs):
             verify_prompt_template = """
@@ -314,8 +313,7 @@ Score:"""
             output = self.model(verify_prompt, config)
             score_text = output.text[0].strip()
             try:
-                import re
-
+                # TODO: not sure if this is very robust
                 score_match = re.search(r"(\d+(\.\d+)?)", score_text)
                 if score_match:
                     score = float(score_match.group(1))
@@ -324,7 +322,7 @@ Score:"""
                     score = 0.5
             except ValueError:
                 score = 0.5
-            scores.append(score)
+            scores.append([score])
         return scores
 
     def replace_step_tag(self, answer: str, lm_step_tag: str):
@@ -347,11 +345,23 @@ class NewRemoteMathEvaluator(MathEvaluator):
         lm_step_tag: Optional[str] = None,
         rm_config=None,
         base_fn: callable = None,
+        model_gpu_util: float = 0.4,
+        prm_gpu_util: float = 0.4,
     ):
         if backend == "vllm":
-            lm_call = LocalLMCaller(lm_call, lm_step_tag=lm_step_tag, backend=backend)
-            rm_call = LocalRewardModelCaller(rm_config)
+            lm_call = LocalLMCaller(
+                lm_call,
+                lm_step_tag=lm_step_tag,
+                backend=backend,
+                gpu_util=model_gpu_util,
+            )
+            logger.info("Loaded VLLM model.")
+            rm_call = LocalRewardModelCaller(
+                rm_config, backend=backend, gpu_util=prm_gpu_util
+            )
+            logger.info("Loaded VLLM reward model.")
         # self.solver_fn = partial()
+        super().__init__(task, lm_call, rm_call)
         super().__init__(task, lm_call, rm_call)
         super().__init__(task, lm_call, rm_call)
         super().__init__(task, lm_call, rm_call)

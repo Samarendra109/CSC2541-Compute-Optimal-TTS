@@ -27,6 +27,18 @@ class EvalArgs:
     vllm: bool = field(
         default=False, metadata={"help": "Use vLLM for faster inference"}
     )
+    model_gpu_util: float = field(
+        default=0.4,
+        metadata={
+            "help": "Only available with vllm, sets up the gpu utilization for the generator model."
+        },
+    )
+    prm_gpu_util: float = field(
+        default=0.4,
+        metadata={
+            "help": "Only available with vllm, sets up the gpu utilization for the policy model."
+        },
+    )
 
     verifier_model: str = field(
         default="qwen2.5b", metadata={"help": "Model code to use as the verifier model"}

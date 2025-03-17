@@ -44,11 +44,12 @@ def load_model(model_name, dtype):
 
 def load_vllm_model(
     model_name,
-    gpu_memory_utilization: float = 0.9,
+    gpu_memory_utilization: float = 0.4,
     tensor_parallel_size: int = 1,
     quantization: Optional[str] = None,  # Options: "awq", "sq", None
     dtype: Optional[Literal["bfloat16", "float16", "float32"]] = "bfloat16",
 ):
+    print(f"Load vllm")
     kwargs = dict(trust_remote_code=True)
     model_path = model_name
     if get_host() == Hosts.vector:
