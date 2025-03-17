@@ -2,3 +2,5 @@ cot_pipeline/.devcontainer/devcontainer.env
 .venv/
 __pycache__
 slurm*.out
+*.egg-info
+.ipynb_checkpoints/
