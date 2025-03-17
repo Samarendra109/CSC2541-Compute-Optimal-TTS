@@ -1,5 +1,4 @@
 cot_pipeline/.devcontainer/devcontainer.env
 .venv/
-csc2541_compute_optimal_tts.egg-info/
-.vscode/sftp.json
 __pycache__
+slurm*.out

@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, Optional
 
 
@@ -41,8 +42,9 @@ class EvalArgs:
         metadata={"help": "Maximum depth of the verifier tree, must be 1 for BoN"},
     )
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
+    controller_addr: str = "http://0.0.0.0:28778"
 
-    task_name: Literal["gsm8k", "math", "aime"] = "gsm8k"
+    task_name: Literal["gsm8k", "MATH", "aime"] = "gsm8k"
     is_few_shot: bool = field(
         default=False,
         metadata={"help": "Pass true to add few shot examples to the prompt."},
@@ -62,6 +64,8 @@ class Config:
     wandb_project: str = "tts"
     wandb_entity: str = None
     seed: int = 42
+    save_dir: Path = Path("./results")
+    resume_dir: Optional[Path] = None
 
     def __post_init__(self):
         if self.wandb_entity is None:

@@ -17,13 +17,27 @@ def load_tokenizer(model_name: str) -> AutoTokenizer:
 
 
 def load_model(model_name, dtype):
-    kwargs = dict()
+    print("Load modelll")
+    # First check if CUDA is available
+    if torch.cuda.is_available():
+        device_map = "auto"  # Use all available GPUs
+    else:
+        device_map = "cpu"  # Force CPU if no GPU available
+
+    kwargs = dict(device_map=device_map)
+    # kwargs = dict(device_map="cpu")
+
     model_path = model_name
     if get_host() == Hosts.vector:
         model_path = VECTOR_HF_MAPPING.get(model_name, model_path)
         kwargs["local_files_only"] = True
+
     if dtype == "bfloat16":
         kwargs["torch_dtype"] = torch.bfloat16
+
+    # Remove the incorrect map_location parameter
+    # kwargs["map_location"] = lambda storage, loc: storage.cuda() if torch.cuda.is_available() else storage.cpu()
+
     model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
     return model
 
@@ -40,7 +54,7 @@ def load_vllm_model(
     if get_host() == Hosts.vector:
         model_path = VECTOR_HF_MAPPING.get(model_name, model_path)
         kwargs["trust_remote_code"] = True
-        kwargs["load_format"] = "hf"
+        # kwargs["load_format"] = "hf"
 
     if dtype == "bfloat16":
         kwargs["dtype"] = "bfloat16"
