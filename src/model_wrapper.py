@@ -36,7 +36,6 @@ class LMOutput:
 
 
 def hf_call(prompt: str, config: LMCallingConfig, model, tokenizer, device):
-    ## TODO: (WIP) wrong will need correction and optimize this probably bottleneck
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
     prompt_tokens = inputs.input_ids.shape[1]
 
@@ -54,44 +53,92 @@ def hf_call(prompt: str, config: LMCallingConfig, model, tokenizer, device):
 
     with torch.no_grad():
         outputs = model.generate(**inputs, **generation_config)
-
+    ## TODO: (WIP) double check
     # Extract generated sequences
     sequences = outputs.sequences
+    generated_texts = [
+        tokenizer.decode(seq[prompt_tokens:], skip_special_tokens=True)
+        for seq in sequences
+    ]
+    # Get sequence lengths
+    output_token_lens = [(seq.size(0) - prompt_tokens) for seq in sequences]
     scores = outputs.scores if hasattr(outputs, "scores") else None
-
-    # Process each generated sequence
-    generated_texts = []
-    output_token_lens = []
+    transition_scores = model.compute_transition_scores(
+        outputs.sequences, outputs.scores, normalize_logits=False
+    )
     cum_logprobs = []
+    for i, seq_len in enumerate(output_token_lens):
+        # Get scores only for generated tokens (not prompt tokens)
+        seq_scores = transition_scores[
+            i, prompt_tokens - 1 : prompt_tokens + seq_len - 1
+        ]
+        # Sum log probabilities
+        cum_logprob = seq_scores.sum().item()
+        cum_logprobs.append(cum_logprob)
 
-    for i in range(config.n):
-        # Get sequence without prompt tokens
-        gen_seq = sequences[i, prompt_tokens:]
+    # Calculate avg logprob by length
+    avg_len_logps = [
+        clp / max(1, otl) for clp, otl in zip(cum_logprobs, output_token_lens)
+    ]
 
-        # Calculate token length
-        output_len = len(gen_seq)
-        output_token_lens.append(output_len)
+    # Determine finish reasons (simplified)
+    finish_reasons = [
+        "length" if otl >= config.max_new_tokens else "stop"
+        for otl in output_token_lens
+    ]
 
-        text = tokenizer.decode(gen_seq, skip_special_tokens=True)
-        generated_texts.append(text)
+    # Create the ConcatedLMGenResult
+    result = ConcatedLMGenResult(
+        text=generated_texts,
+        prompt_tokens=[prompt_tokens] * config.n,
+        num_tokens=output_token_lens,
+        cumulative_logprob=cum_logprobs,
+        logp_avg_by_len=avg_len_logps,
+        finish_reason=finish_reasons,
+    )
 
-        # Calculate cumulative logprob (if scores available)
-        if scores:
-            logprobs = []
-            for j, logits in enumerate(scores):
-                if (
-                    i < logits.shape[0]
-                ):  # Check if this sequence is still being generated
-                    idx = j % config.n  # Map to the correct sequence
-                    token_id = sequences[idx, prompt_tokens + j].item()
-                    token_logits = logits[idx]
-                    token_probs = torch.nn.functional.softmax(token_logits, dim=0)
-                    token_logprob = torch.log(token_probs[token_id]).item()
-                    logprobs.append(token_logprob)
-            cum_logprob = sum(logprobs)
-        else:
-            cum_logprob = 0.0
+    return result
 
+
+def hf_rm_call(prompt: List[str], config: LMCallingConfig, model, tokenizer, device):
+    inputs = [tokenizer(p, return_tensors="pt").to(device) for p in prompt]
+    prompt_tokens = inputs.input_ids.shape[1]
+
+    generation_config = {
+        "max_new_tokens": config.max_new_tokens,
+        "do_sample": config.temperature > 0,
+        "temperature": config.temperature if config.temperature > 0 else 1.0,
+        "top_p": config.top_p,
+        "top_k": config.top_k if config.top_k else 40,
+        "num_return_sequences": 1,
+        "pad_token_id": tokenizer.eos_token_id,
+        "return_dict_in_generate": True,
+        "output_scores": True,  # To get logprobs
+    }
+
+    with torch.no_grad():
+        outputs = model.generate(**inputs, **generation_config)
+    ## TODO: (WIP) double check
+    # Extract generated sequences
+    sequences = outputs.sequences
+    generated_texts = [
+        tokenizer.decode(seq[prompt_tokens:], skip_special_tokens=True)
+        for seq in sequences
+    ]
+    # Get sequence lengths
+    output_token_lens = [(seq.size(0) - prompt_tokens) for seq in sequences]
+    scores = outputs.scores if hasattr(outputs, "scores") else None
+    transition_scores = model.compute_transition_scores(
+        outputs.sequences, outputs.scores, normalize_logits=False
+    )
+    cum_logprobs = []
+    for i, seq_len in enumerate(output_token_lens):
+        # Get scores only for generated tokens (not prompt tokens)
+        seq_scores = transition_scores[
+            i, prompt_tokens - 1 : prompt_tokens + seq_len - 1
+        ]
+        # Sum log probabilities
+        cum_logprob = seq_scores.sum().item()
         cum_logprobs.append(cum_logprob)
 
     # Calculate avg logprob by length
@@ -172,6 +219,7 @@ Solution: {solution}
 Is the above solution correct? First, verify the reasoning step-by-step. Then, give a score from 0 to 10 where 0 means completely incorrect and 10 means completely correct.
 
 Score:"""
+    # format_str = "<|im_start|>system\nPlease reason step by step, and put your final answer within \\boxed{{}}.<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n{answer}"
 
     def rm_call(question: str, partial_sol: str) -> float:
         verify_prompt = verify_prompt_template.format(
@@ -213,6 +261,7 @@ class LocalLMCaller(LanguageModelCallingFunction):
         else:
             raise ValueError("Pass hf or vllm as backend.")
         self.backend = backend
+        self.lm_step_tag = lm_step_tag
 
     def __call__(self, input_str: str, config: LMCallingConfig) -> LMOutput:
         if self.backend == "vllm":
@@ -221,7 +270,7 @@ class LocalLMCaller(LanguageModelCallingFunction):
 
 
 class LocalRewardModelCaller:
-    def __init__(self, config, backend: Literal["hf", "vllm"] = "vllm"):
+    def __init__(self, config, backend: Literal["hf", "vllm"] = "hf"):
         self.config = config
         self.step_tag = config.step_tag
         self.format_str = config.format_str
@@ -248,27 +297,33 @@ class LocalRewardModelCaller:
                 )
                 for s in question_answer_pairs
             ]
-
-        output = self.model(input_str, self.config)
-        score_text = output.text[0].strip()
-        try:
-            import re
-
-            score_match = re.search(r"(\d+(\.\d+)?)", score_text)
-            if score_match:
-                score = float(score_match.group(1))
-                score = min(max(score / 10.0, 0.0), 1.0)
-            else:
-                score = 0.5
-        except ValueError:
-            score = 0.5
-        return score
-        if isinstance(question_answer_pairs, tuple):
-            question_answer_pairs = [question_answer_pairs]
         scores = []
-        for question, answer in question_answer_pairs:
-            formatted_answer = self.replace_step_tag(answer, lm_step_tag)
-            score = len(formatted_answer) % 10  # Placeholder logic for scoring
+        for i, (question, answer) in enumerate(question_answer_pairs):
+            verify_prompt_template = """
+Question: {question}
+
+Solution: {solution}
+
+Is the above solution correct? First, verify the reasoning step-by-step. Then, give a score from 0 to 10 where 0 means completely incorrect and 10 means completely correct.
+
+Score:"""
+            verify_prompt = verify_prompt_template.format(
+                question=question, solution=answer
+            )
+            config = LMCallingConfig(temperature=0.1, top_p=0.9, top_k=1, n=1)
+            output = self.model(verify_prompt, config)
+            score_text = output.text[0].strip()
+            try:
+                import re
+
+                score_match = re.search(r"(\d+(\.\d+)?)", score_text)
+                if score_match:
+                    score = float(score_match.group(1))
+                    score = min(max(score / 10.0, 0.0), 1.0)
+                else:
+                    score = 0.5
+            except ValueError:
+                score = 0.5
             scores.append(score)
         return scores
 
@@ -291,10 +346,18 @@ class NewRemoteMathEvaluator(MathEvaluator):
         backend: Literal["vllm", "hf"] = "hf",
         lm_step_tag: Optional[str] = None,
         rm_config=None,
+        base_fn: callable = None,
     ):
-        lm_call = LocalLMCaller(lm_call, lm_step_tag=lm_step_tag, backend=backend)
-        rm_call = LocalRewardModelCaller(rm_config)
-
+        if backend == "vllm":
+            lm_call = LocalLMCaller(lm_call, lm_step_tag=lm_step_tag, backend=backend)
+            rm_call = LocalRewardModelCaller(rm_config)
+        # self.solver_fn = partial()
+        super().__init__(task, lm_call, rm_call)
+        super().__init__(task, lm_call, rm_call)
+        super().__init__(task, lm_call, rm_call)
+        super().__init__(task, lm_call, rm_call)
+        super().__init__(task, lm_call, rm_call)
+        super().__init__(task, lm_call, rm_call)
         super().__init__(task, lm_call, rm_call)
         super().__init__(task, lm_call, rm_call)
         super().__init__(task, lm_call, rm_call)

@@ -141,8 +141,10 @@ def main():
             model_name=eval_args.verifier_model,
             controller_addr=eval_args.controller_addr,
         )
-        if not eval_args.vllm:
-            rm_call = LocalRewardModelCaller(rm_config)
+        # if not eval_args.vllm:
+        rm_call = LocalRewardModelCaller(
+            rm_config, backend="vllm" if eval_args.vllm else "hf"
+        )
 
     # Configure generation parameters
     gen_config = LMCallingConfig(
@@ -164,7 +166,6 @@ def main():
         # For single-step, we'll use best_of_n with n=1
         method_config = BestOfNConfig(task_name=eval_args.task_name, num_sequence=1)
         solver_fn = partial(best_of_n, method_config, gen_config)
-
     elif method_name == "cot":
         method_config = CoTConfig(task_name=eval_args.task_name)
         solver_fn = partial(
@@ -173,10 +174,14 @@ def main():
 
     elif method_name == "bon":
         method_config = BestOfNConfig(
-            task_name=eval_args.task_name, num_sequence=eval_args.beam_width
+            task_name=eval_args.task_name,
+            num_sequence=eval_args.beam_width,
         )
-        solver_fn = partial(best_of_n, method_config, gen_config)
-
+        solver_fn = partial(
+            best_of_n,
+            method_config,
+            gen_config,
+        )
     elif method_name == "beam":
         method_config = BeamSearchConfig(
             task_name=eval_args.task_name,
@@ -199,9 +204,7 @@ def main():
             init_critic_value=True,
             select_by_prior=False,
         )
-        solver_fn = partial(
-            rstar_mcts, method_config, gen_config, lm_call=llm_call, rm_call=rm_call
-        )
+        solver_fn = partial(rstar_mcts, method_config, gen_config)
 
     else:
         raise ValueError(f"Unknown strategy: {method_name}")
@@ -270,7 +273,6 @@ def main():
     num_workers = min(4, num_gpus)
 
     def parallel_evaluate_dataset(
-        test_problems: List[Dict],
         solver_fn: Callable,
         task_name: str,
         num_workers: int = 4,
@@ -281,25 +283,30 @@ def main():
         Evaluate problems in parallel using a process pool.
         """
         results = []
-
+        kwargs = dict()
+        if eval_args.vllm:
+            kwargs["lm_call"] = eval_args.model_name
+            kwargs["backend"] = "vllm"
+        else:
+            kwargs["lm_call"] = llm_call
+            kwargs["rm_call"] = rm_call
+            kwargs["backend"] = "hf"
         ## TODO: check if it
         actor_pool = ActorPool(
             [
                 # MathEvaluator(
                 NewRemoteMathEvaluator.remote(
                     task=Task(task_name=task_name, is_few_shot=eval_args.is_few_shot),
-                    lm_call=eval_args.model_name,
-                    # rm_call=rm_call,
-                    backend="vllm" if eval_args.vllm else "hf",
                     lm_step_tag=lm_step_tag,
                     rm_config=rm_config,
+                    **kwargs,
                 )
                 for _ in range(num_workers)
             ]
         )
         assert torch.cuda.is_available()
         # Convert test_ds items to a (index, item) tuple
-        indexed_test_ds = list(enumerate(test_problems))
+        indexed_test_ds = list(enumerate(test_ds))
 
         # Use the map_unordered with the index as the key
         res_q = actor_pool.map_unordered(
@@ -307,7 +314,7 @@ def main():
         )
 
         for i, (problem_inst, result, output) in enumerate(
-            tqdm(res_q, total=len(test_problems))
+            tqdm(res_q, total=len(test_ds))
         ):
             results.append(result)
             if record_writer:
@@ -328,7 +335,6 @@ def main():
     # Run parallel evaluation
     if test_ds:
         new_results = parallel_evaluate_dataset(
-            test_problems=test_ds,
             solver_fn=solver_fn,
             task_name=eval_args.task_name,
             num_workers=num_workers,

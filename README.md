@@ -19,7 +19,9 @@ If the above fails, revert to the openr installation.
 
 ```bash
 python main.py --model_name "Qwen/Qwen2.5-0.5B-Instruct"   --tts_strategy bon   --beam_width 5   --task_name MATH   --use_wandb=false   --save_dir "./results" --verifier_model "Qwen/Qwen2.5-0.5B-Instruct"  
---vllm
+
+## currently vllm version is not working
+# --vllm
 ```
 
 
