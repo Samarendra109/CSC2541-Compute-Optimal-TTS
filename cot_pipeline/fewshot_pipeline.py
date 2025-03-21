@@ -89,25 +89,29 @@ def get_fewshot_prompt_query_target(
         answer_i = examples[f"{answer_col}_{i}"]
         cot_i = examples[f"{cot_col}_{i}"] if cot_col else ""
         
-        prompt_str += "\n".join((
-            "Query:",
-            query_i,
-            "Reasoning:",
-            cot_i,
-            "Answer:",
-            answer_i,
-            ""
-        ))
+        if cot_i == "":
+            prompt_str += "\n".join((
+                "Query:",
+                query_i,
+                "Answer:",
+                answer_i,
+                ""
+            ))
+        else:
+            prompt_str += "\n".join((
+                "Query:",
+                query_i,
+                "Reasoning:",
+                cot_i,
+                "Answer:",
+                answer_i,
+                ""
+            ))
 
     query = examples[query_col]
-    cot = examples[cot_col] if cot_col else ""
     prompt_str += "\n".join((
             "Query:",
             query,
-            "Reasoning:",
-            cot,
-            "Answer:",
-            ""
         ))
     
     return {"prompt": prompt_str}
@@ -118,6 +122,6 @@ if __name__ == '__main__':
     ds = ds.filter(lambda example: example['task'] == 'quac')
     
     fs_prompt_dataset = get_fewshot_prompt_dataset(
-        ds, n=3, query_col='source', answer_col='target', cot_col='rationale', fewshot_dataset=None
+        ds, n=3, fewshot_dataset=ds_fewshot
     ).map(partial(get_fewshot_prompt_query_target, n=3, query_col='source', answer_col='target', cot_col='rationale'))
     pass
