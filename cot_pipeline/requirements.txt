@@ -7,3 +7,4 @@ trl
 bert_score
 torcheval
 accelerate
+vllm

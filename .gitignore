@@ -1,1 +1,2 @@
 cot_pipeline/.devcontainer/devcontainer.env
+**/__pycache__/
