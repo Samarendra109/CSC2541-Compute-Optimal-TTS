@@ -25,7 +25,7 @@ if __name__ == '__main__':
         ds_main, n=3, fewshot_dataset=ds_fewshot
     ).map(partial(get_fewshot_prompt_query_target, n=3, query_col='question', answer_col='target', cot_col='reasoning'))
 
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "Qwen/Qwen2.5-3B-Instruct"
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -55,12 +55,18 @@ if __name__ == '__main__':
 
         generated_ids = model.generate(
             **model_inputs,
-            max_new_tokens=512
+            max_new_tokens=512,
+            do_sample=False,
+            num_beams=1,
+            top_k=None,
+            temperature=None,
+            top_p=None
         )
         generated_ids = [
             output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
         ]
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        print(response)
         pass
 

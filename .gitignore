@@ -1,2 +1,6 @@
 cot_pipeline/.devcontainer/devcontainer.env
 **/__pycache__/
+**/checking_code/
+**/checking_code/**
+**/results/
+**/results/**

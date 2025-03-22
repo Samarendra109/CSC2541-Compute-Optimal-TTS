@@ -8,3 +8,4 @@ bert_score
 torcheval
 accelerate
 vllm
+ollama
