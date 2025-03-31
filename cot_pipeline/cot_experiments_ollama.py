@@ -34,8 +34,8 @@ def get_tokens_used(prompt, response, tokenizer) -> int:
 
 if __name__ == '__main__':
 
-    model_size = 3
-    num_shot = int(sys.argv[1])
+    model_size = sys.argv[1]
+    num_shot = int(sys.argv[2])
     ds_fewshot = load_dataset("openai/gsm8k", 'main', split='train').map(preprocess_gsm8k)
     ds_main = load_dataset("openai/gsm8k", 'main', split='test').map(preprocess_gsm8k)
 
