@@ -1,11 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=openr
-#SBATCH --time=04:00:00
-#SBATCH --cpus-per-task=2
+#SBATCH --time=12:00:00
 #SBATCH --mem-per-cpu=16G
-#SBATCH --gres=gpu:a40:2
+#SBATCH --cpus-per-gpu=2
+##SBATCH --gres=gpu:a40:2
+##SBATCH --cpus-per-task=2
+##SBATCH --qos=m2
+#SBATCH --exclude=gpu038
 
 ### Make sure to define BASE_DIR, VALUE_MODEL_NAME, POLICY_MODEL_NAME, METHOD
+
+# Function to check if models are registered with controller
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+SCRIPT_DIR="/h/altintas/llm-tts/scripts/"
+echo $SCRIPT_DIR
+
 
 set -e
 METHOD="bon"
@@ -24,6 +33,7 @@ cd openr
 HOST_ADDR=0.0.0.0
 CONTROLER_PORT=28777
 WORKER_BASE_PORT=30010
+WORKER_BASE_PORT=$((SLURM_JOB_ID % 65000))
 
 echo PYTHON_EXECUTABLE=$(which python3)
 PYTHON_EXECUTABLE=$(which python3)
@@ -63,17 +73,26 @@ MODEL_PATH="/model-weights/$POLICY_MODEL_NAME"
 # 14 -> 15624934
 # 32 -> 15624936
 
-
+check_models_ready() {
+    $PYTHON_EXECUTABLE "$SCRIPT_DIR/check_models_ready.py" --host $HOST_ADDR --controller_port $CONTROLER_PORT
+}
 
 LOGDIR=logs_fastchat
 
 tmux start-server
-tmux new-session -s FastChat1 -n controller -d
+tmux new-session -s FastChat1-$SLURM_JOB_ID -n controller -d
 tmux send-keys "export LOGDIR=${LOGDIR}" Enter
 tmux send-keys "$PYTHON_EXECUTABLE -m fastchat.serve.controller --port ${CONTROLER_PORT} --host $HOST_ADDR" Enter
 
-NUM_LM_WORKER=1
+NUM_LM_WORKER=${4-1}
 NUM_RM_WORKER=1
+RESUME_DIR=${5-""}
+RESUME_STR=""
+
+if [[ $RESUME_DIR != "" ]]; then
+    echo Resuming from $RESUME_DIR
+    RESUME_STR="  --resume_dir $RESUME_DIR  "
+fi
 
 echo "Wait 10 seconds ..."
 sleep 5
@@ -94,15 +113,21 @@ elif [[ "$POLICY_MODEL_NAME" =~ "7B" ]] ;then
 elif [[ "$POLICY_MODEL_NAME" =~ "14B" ]] ;then 
     beam_width=4
 elif [[ "$POLICY_MODEL_NAME" =~ "30B" ]] || [[ "$POLICY_MODEL_NAME" =~ "32B" ]]; then
-    num_gpus=1
     beam_width=2
 elif [[ "$POLICY_MODEL_NAME" =~ "70B" ]] || [[ "$POLICY_MODEL_NAME" =~ "72B" ]]; then
-    num_gpus=2
     beam_width=1
+fi
+
+if [[ "$POLICY_MODEL_NAME" =~ "30B" ]] || [[ "$POLICY_MODEL_NAME" =~ "32B" ]]; then
+    num_gpus=2
+elif [[ "$POLICY_MODEL_NAME" =~ "70B" ]] || [[ "$POLICY_MODEL_NAME" =~ "72B" ]]; then
+    num_gpus=2
 fi
 echo Running with beam width $beam_width
 
 echo "Starting workers"
+echo Distributing policy model on $num_gpus gpus.
+
 for i in $(seq 0 $((NUM_LM_WORKER-1)))
 do
     # Create proper GPU list based on num_gpus
@@ -117,51 +142,19 @@ do
   WORKER_PORT=$((WORKER_BASE_PORT+i))
   tmux new-window -n policy_worker_$i
   tmux send-keys "export LOGDIR=${LOGDIR}" Enter
-  tmux send-keys "CUDA_VISIBLE_DEVICES=$GPU_LIST $PYTHON_EXECUTABLE -m reason.llm_service.workers.vllm_worker --model-path $MODEL_PATH --controller-address http://$HOST_ADDR:$CONTROLER_PORT --host $HOST_ADDR --port $WORKER_PORT --worker-address http://$HOST_ADDR:$WORKER_PORT --dtype bfloat16 --num-gpus=$num_gpus --swap-space 16 " Enter
+  tmux send-keys "VLLM_WORKER_MULTIPROC_METHOD=spawn CUDA_VISIBLE_DEVICES=$GPU_LIST $PYTHON_EXECUTABLE -m reason.llm_service.workers.vllm_worker --model-path $MODEL_PATH --controller-address http://$HOST_ADDR:$CONTROLER_PORT --host $HOST_ADDR --port $WORKER_PORT --worker-address http://$HOST_ADDR:$WORKER_PORT --dtype bfloat16 --num-gpus=$num_gpus --swap-space 4 " Enter
 done
 
 # start value service
 for i in $(seq 0 $((NUM_RM_WORKER-1)))
 do
-    WORKER_PORT=$((i+WORKER_BASE_PORT+$num_gpus*NUM_LM_WORKER))
+    WORKER_PORT=$((i+WORKER_BASE_PORT+num_gpus*NUM_LM_WORKER))
   tmux new-window -n value_worker
   tmux send-keys "export LOGDIR=${LOGDIR}" Enter
-  tmux send-keys "CUDA_VISIBLE_DEVICES=$((i+NUM_LM_WORKER+CUDA_DEVICE_BASE)) $PYTHON_EXECUTABLE -m reason.llm_service.workers.reward_model_worker --model-path $VALUE_MODEL_PATH --controller-address http://$HOST_ADDR:$CONTROLER_PORT --host $HOST_ADDR --port $WORKER_PORT --worker-address http://$HOST_ADDR:$WORKER_PORT  " Enter
+  tmux send-keys "CUDA_VISIBLE_DEVICES=$((i+NUM_LM_WORKER*num_gpus+CUDA_DEVICE_BASE)) $PYTHON_EXECUTABLE -m reason.llm_service.workers.reward_model_worker --model-path $VALUE_MODEL_PATH --controller-address http://$HOST_ADDR:$CONTROLER_PORT --host $HOST_ADDR --port $WORKER_PORT --worker-address http://$HOST_ADDR:$WORKER_PORT  " Enter
 done
 
 
-# Function to check if models are registered with controller
-check_models_ready() {
-echo "checking models"
-  $PYTHON_EXECUTABLE -c "
-import requests
-import time
-import sys
-
-def check_models(controller_addr='http://${HOST_ADDR}:${CONTROLER_PORT}'):
-    print(controller_addr)
-    try:
-        response = requests.post(controller_addr + '/list_models')
-        if response.status_code == 200:
-            models = response.json()['models']
-            print(models)
-            return len(models) >= 2 ## $((NUM_LM_WORKER + NUM_RM_WORKER))
-        return False
-    except:
-        return False
-
-# Wait up to 20 minutes for models to be ready
-for i in range(120):
-    if check_models():
-        print('All models ready!')
-        sys.exit(0)
-    print(f'Waiting for models... {i}/120')
-    time.sleep(10)
-
-print('Timed out waiting for models to initialize')
-sys.exit(1)
-"
-}
 
 
 bon() {
@@ -174,8 +167,8 @@ bon() {
     --max_new_tokens 2048 \
     --save_dir debug \
     --method best_of_n \
-    --num_worker 2 \
-    --controller_addr http://0.0.0.0:28777
+    --num_worker 4  $RESUME_STR \
+    --controller_addr http://0.0.0.0:28777 
 }
 
 beam_search() {
@@ -186,14 +179,14 @@ beam_search() {
     --temperature 0.7 \
     --max_new_tokens 2048 \
     --num_sequence 1 \
-    --tree_max_width $beam_search \
+    --tree_max_width $beam_width \
     --tree_max_depth 50 \
     --save_dir debug \
     --method beam_search \
-    --num_worker 2 \
+    --num_worker 4 $RESUME_STR \
     --controller_addr http://0.0.0.0:28777
-
 }
+
 echo "Waiting for all models to initialize..."
 check_models_ready
 
